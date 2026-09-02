@@ -1,7 +1,17 @@
 import type { ReceiptMeta, UploadTicket } from './types';
 
+/**
+ * Base path for the upload-URL request. Defaults to the same-origin relative
+ * "/api", which nginx reverse-proxies to the CreateUploadURL Cloud Run service
+ * (option B: same-origin, no CORS). Override with VITE_API_BASE for local dev.
+ */
+function apiBase(): string {
+  const base = import.meta.env.VITE_API_BASE as string | undefined;
+  return (base ?? '/api').replace(/\/$/, '');
+}
+
 function endpoint(): string {
-  return import.meta.env.VITE_UPLOAD_URL_ENDPOINT as string;
+  return `${apiBase()}/upload-url`;
 }
 
 /**

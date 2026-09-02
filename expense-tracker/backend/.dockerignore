@@ -1,0 +1,13 @@
+# VCS
+.git
+.gitignore
+
+# Build artifacts
+bin/
+/server
+*.test
+*.out
+
+# Local tooling / editor cruft
+.DS_Store
+*.log

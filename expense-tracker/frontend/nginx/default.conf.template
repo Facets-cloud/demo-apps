@@ -1,0 +1,29 @@
+# nginx serves the built SPA and reverse-proxies the upload-URL API.
+#
+# ${PORT} and ${BACKEND_URL} are substituted by envsubst at container start
+# (the nginx:alpine entrypoint runs envsubst over /etc/nginx/templates/*.template).
+# nginx's own runtime variables use the bare "$name" form so envsubst leaves
+# them untouched (it only replaces defined env vars: PORT and BACKEND_URL).
+server {
+  listen       ${PORT};
+  server_name  _;
+  root   /usr/share/nginx/html;
+  index  index.html;
+
+  # SPA client-side routing: fall back to index.html for unknown paths.
+  location / {
+    try_files $uri $uri/ /index.html;
+  }
+
+  # Reverse-proxy the upload-URL API to the CreateUploadURL Cloud Run service.
+  # The trailing slash on proxy_pass strips the "/api/" prefix, so the SPA's
+  # POST /api/upload-url is forwarded to ${BACKEND_URL}/upload-url.
+  # BACKEND_URL is injected at deploy time, e.g.
+  #   https://create-upload-url-xxxx.a.run.app
+  location /api/ {
+    proxy_pass ${BACKEND_URL}/;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}

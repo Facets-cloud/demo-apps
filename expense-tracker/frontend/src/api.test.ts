@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createUploadUrl, putFile } from './api';
 import type { ReceiptMeta, UploadTicket } from './types';
 
-const ENDPOINT = 'http://localhost:8080';
+// Same-origin default: nginx proxies /api/* to the CreateUploadURL service.
+const DEFAULT_ENDPOINT = '/api/upload-url';
 
 beforeEach(() => {
-  vi.stubEnv('VITE_UPLOAD_URL_ENDPOINT', ENDPOINT);
+  // No VITE_API_BASE stubbed -> api.ts must fall back to the relative "/api".
 });
 
 afterEach(() => {
@@ -30,7 +31,7 @@ const ticket: UploadTicket = {
 };
 
 describe('createUploadUrl', () => {
-  it('POSTs metadata as JSON to the endpoint and returns the ticket', async () => {
+  it('POSTs metadata as JSON to the same-origin /api/upload-url and returns the ticket', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -42,11 +43,26 @@ describe('createUploadUrl', () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
-    expect(url).toBe(ENDPOINT);
+    expect(url).toBe(DEFAULT_ENDPOINT);
     expect(init.method).toBe('POST');
     expect(init.headers['Content-Type']).toBe('application/json');
     expect(JSON.parse(init.body)).toEqual(meta);
     expect(result).toEqual(ticket);
+  });
+
+  it('honours VITE_API_BASE as the proxy base for the upload-url request', async () => {
+    vi.stubEnv('VITE_API_BASE', 'http://localhost:8080');
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ticket,
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createUploadUrl(meta);
+
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe('http://localhost:8080/upload-url');
   });
 
   it('throws with the server error message on a non-2xx response', async () => {

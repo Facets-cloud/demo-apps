@@ -1,0 +1,62 @@
+name: build-and-register
+
+# Builds the expense-tracker images on GitHub's amd64 runners (Cloud Run requires
+# linux/amd64), pushes them to the Facets-registered GAR artifactory, and registers
+# each build with its Facets artifact. No direct gcloud/Cloud Build needed.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'expense-tracker/backend/**'
+      - 'expense-tracker/frontend/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch: {}
+
+env:
+  PROJECT: expense-app-praxis
+  ENVIRONMENT: dev
+  REGISTRY: expense-app
+  CONTROL_PLANE_URL: ${{ secrets.CONTROL_PLANE_URL }}
+  FACETS_USERNAME: ${{ secrets.FACETS_USERNAME }}
+  FACETS_TOKEN: ${{ secrets.FACETS_TOKEN }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest   # amd64 — matches Cloud Run
+    strategy:
+      matrix:
+        include:
+          - dir: backend
+            artifact: expense-app-backend
+          - dir: frontend
+            artifact: expense-app-frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install raptor (linux/amd64)
+        run: |
+          curl -sSL -o /usr/local/bin/raptor \
+            https://github.com/Facets-cloud/raptor-releases/releases/latest/download/raptor-linux-amd64
+          chmod +x /usr/local/bin/raptor
+          raptor --version
+
+      - name: Docker login to the Facets-registered GAR
+        run: raptor get registry-credentials "$REGISTRY" -p "$PROJECT" -a "${{ matrix.artifact }}"
+
+      - name: Resolve repository + build + push (amd64)
+        id: build
+        run: |
+          REPO=$(raptor get registry-credentials "$REGISTRY" -p "$PROJECT" -a "${{ matrix.artifact }}" --repository-uri)
+          IMG="$REPO:${GITHUB_SHA}"
+          echo "Building $IMG from expense-tracker/${{ matrix.dir }}"
+          docker build -t "$IMG" "expense-tracker/${{ matrix.dir }}"
+          docker push "$IMG"
+          echo "img=$IMG" >> "$GITHUB_OUTPUT"
+
+      - name: Register the build with Facets
+        run: |
+          raptor set artifact-uri -p "$PROJECT" -e "$ENVIRONMENT" "${{ matrix.artifact }}" \
+            --uri "${{ steps.build.outputs.img }}" \
+            --registry "$REGISTRY" \
+            --external-id "${GITHUB_RUN_ID}"

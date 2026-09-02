@@ -7,12 +7,13 @@ package function
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,19 +133,53 @@ func newSigner(ctx context.Context) (signer.URLSigner, error) {
 // ---------------------------------------------------------------------------
 
 // storageObjectData is the minimal subset of the GCS finalize event payload we
-// need — avoids pulling in a heavy genproto dependency.
+// need — avoids pulling in a heavy genproto dependency. The Eventarc CloudEvent
+// data for google.cloud.storage.object.v1.finalized is the Storage object JSON.
 type storageObjectData struct {
-	Bucket      string `json:"bucket"`
-	Name        string `json:"name"`
-	ContentType string `json:"contentType"`
-	Size        string `json:"size"` // GCS encodes size as a string
-	TimeCreated string `json:"timeCreated"`
+	Bucket      string  `json:"bucket"`
+	Name        string  `json:"name"`
+	ContentType string  `json:"contentType"`
+	Size        flexInt `json:"size"` // GCS encodes size as a string; number also tolerated
+	TimeCreated string  `json:"timeCreated"`
+}
+
+// flexInt decodes a JSON value that is either a quoted string (as GCS encodes
+// object size) or a bare number. An absent/empty/null value decodes to 0.
+type flexInt int64
+
+func (f *flexInt) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	if s == "" || s == "null" {
+		*f = 0
+		return nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid size %q: %w", s, err)
+	}
+	*f = flexInt(n)
+	return nil
+}
+
+// decodeStorageObject decodes an Eventarc GCS-finalize CloudEvent into the
+// minimal GCSObject the service needs.
+func decodeStorageObject(e event.Event) (service.GCSObject, error) {
+	var data storageObjectData
+	if err := e.DataAs(&data); err != nil {
+		return service.GCSObject{}, fmt.Errorf("decode storage event: %w", err)
+	}
+	return service.GCSObject{
+		Bucket:      data.Bucket,
+		Name:        data.Name,
+		ContentType: data.ContentType,
+		Size:        int64(data.Size),
+	}, nil
 }
 
 func receiptUploadedHandler(ctx context.Context, e event.Event) error {
-	var data storageObjectData
-	if err := e.DataAs(&data); err != nil {
-		return fmt.Errorf("decode storage event: %w", err)
+	obj, err := decodeStorageObject(e)
+	if err != nil {
+		return err
 	}
 
 	svc, cleanup, err := newService(ctx)
@@ -153,49 +188,72 @@ func receiptUploadedHandler(ctx context.Context, e event.Event) error {
 	}
 	defer cleanup()
 
-	return svc.Handle(ctx, service.GCSObject{
-		Bucket:      data.Bucket,
-		Name:        data.Name,
-		ContentType: data.ContentType,
-	})
+	return svc.Handle(ctx, obj)
 }
 
-func newService(ctx context.Context) (*service.Service, func(), error) {
-	dsn := os.Getenv("DB_DSN")
-	if dsn == "" {
-		return nil, nil, fmt.Errorf("DB_DSN is required")
-	}
-	st, err := store.NewPgxStore(ctx, dsn)
-	if err != nil {
-		return nil, nil, fmt.Errorf("store init: %w", err)
-	}
+// memStore is a process-lifetime in-memory store. It exists only as long as the
+// Cloud Run instance: data is lost on restart, on scale-to-zero, and is NOT
+// shared across instances. This is the "in-memory now, Cloud SQL later" mode —
+// set DB_DSN to switch to the durable Postgres store.
+var memStore = store.NewFake()
 
+func newService(ctx context.Context) (*service.Service, func(), error) {
 	project := os.Getenv("GCP_PROJECT")
 	topic := os.Getenv("PUBSUB_TOPIC")
 	if project == "" || topic == "" {
-		st.Close()
 		return nil, nil, fmt.Errorf("GCP_PROJECT and PUBSUB_TOPIC are required")
 	}
 	pub, err := events.NewPubSubPublisher(ctx, project, topic)
 	if err != nil {
-		st.Close()
 		return nil, nil, fmt.Errorf("publisher init: %w", err)
 	}
 
-	cleanup := func() { st.Close() }
-	return service.New(st, pub), cleanup, nil
+	// Durable Postgres when DB_DSN is set; otherwise the ephemeral in-memory store.
+	if dsn := os.Getenv("DB_DSN"); dsn != "" {
+		st, err := store.NewPgxStore(ctx, dsn)
+		if err != nil {
+			return nil, nil, fmt.Errorf("store init: %w", err)
+		}
+		return service.New(st, pub), func() { st.Close() }, nil
+	}
+
+	log.Printf("ReceiptUploaded: DB_DSN unset — using in-memory store (ephemeral; data is lost on scale-to-zero/restart)")
+	return service.New(memStore, pub), func() {}, nil
 }
 
 // ---------------------------------------------------------------------------
 // SummaryConsumer (CloudEvent: Pub/Sub topic)
 // ---------------------------------------------------------------------------
 
-// pubSubMessage is the Pub/Sub push envelope: the JSON payload is base64 in
-// message.data.
-type pubSubMessage struct {
+// messagePublishedData is the Eventarc envelope for a
+// google.cloud.pubsub.topic.v1.messagePublished CloudEvent. The published
+// payload is base64 in message.data; encoding/json base64-decodes a []byte
+// field automatically.
+type messagePublishedData struct {
 	Message struct {
-		Data []byte `json:"data"` // encoding/json base64-decodes []byte automatically
+		Data       []byte            `json:"data"`
+		MessageID  string            `json:"messageId"`
+		Attributes map[string]string `json:"attributes"`
 	} `json:"message"`
+	Subscription string `json:"subscription"`
+}
+
+// decodeExpenseCreated unwraps the Pub/Sub messagePublished envelope and
+// decodes the base64 message.data into an ExpenseCreated.
+func decodeExpenseCreated(e event.Event) (expense.ExpenseCreated, error) {
+	var env messagePublishedData
+	if err := e.DataAs(&env); err != nil {
+		return expense.ExpenseCreated{}, fmt.Errorf("decode pubsub envelope: %w", err)
+	}
+	payload := env.Message.Data
+	if len(payload) == 0 {
+		return expense.ExpenseCreated{}, fmt.Errorf("empty pubsub message data")
+	}
+	var ev expense.ExpenseCreated
+	if err := json.Unmarshal(payload, &ev); err != nil {
+		return expense.ExpenseCreated{}, fmt.Errorf("unmarshal expense.created: %w", err)
+	}
+	return ev, nil
 }
 
 var (
@@ -205,26 +263,9 @@ var (
 )
 
 func summaryConsumerHandler(_ context.Context, e event.Event) error {
-	var msg pubSubMessage
-	if err := e.DataAs(&msg); err != nil {
-		return fmt.Errorf("decode pubsub envelope: %w", err)
-	}
-	// Data may already be raw JSON (emulator) or base64 (real). encoding/json
-	// handles the base64 case when the field is []byte; fall back to raw.
-	payload := msg.Message.Data
-	if len(payload) == 0 {
-		return fmt.Errorf("empty pubsub message data")
-	}
-	// Some transports double-encode; try a defensive base64 decode if it's not JSON.
-	if payload[0] != '{' {
-		if decoded, err := base64.StdEncoding.DecodeString(string(payload)); err == nil {
-			payload = decoded
-		}
-	}
-
-	var ev expense.ExpenseCreated
-	if err := json.Unmarshal(payload, &ev); err != nil {
-		return fmt.Errorf("unmarshal expense.created: %w", err)
+	ev, err := decodeExpenseCreated(e)
+	if err != nil {
+		return err
 	}
 
 	summaryMu.Lock()
