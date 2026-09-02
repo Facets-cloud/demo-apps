@@ -1,0 +1,10 @@
+# Go
+/expense-tracker/backend/bin/
+*.test
+# Node
+node_modules/
+dist/
+.vite/
+# Env
+.env
+.env.local
