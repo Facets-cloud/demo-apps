@@ -12,7 +12,7 @@ import (
 func newObj() GCSObject {
 	return GCSObject{
 		Bucket:      "receipts-bucket",
-		Name:        "receipts/2026-09-01_starbucks_4.50_a1b2c3.jpg",
+		Name:        "receipts/2026-09-01_starbucks_4.50_USD_a1b2c3.jpg",
 		ContentType: "image/jpeg",
 		Size:        1024,
 	}
@@ -40,6 +40,9 @@ func TestHandle_StoresAndPublishes(t *testing.T) {
 	if saved.Vendor != "starbucks" || saved.AmountCents != 450 {
 		t.Errorf("parsed fields wrong: %+v", saved)
 	}
+	if saved.Currency != "USD" {
+		t.Errorf("currency = %q, want USD", saved.Currency)
+	}
 	if saved.SourceObject != newObj().Name {
 		t.Errorf("source object = %q", saved.SourceObject)
 	}
@@ -51,6 +54,9 @@ func TestHandle_StoresAndPublishes(t *testing.T) {
 	// Published event must match the saved expense.
 	if ev.ID != saved.ID || ev.Vendor != saved.Vendor || ev.AmountCents != saved.AmountCents {
 		t.Errorf("published event does not match saved expense: %+v vs %+v", ev, saved)
+	}
+	if ev.Currency != "USD" {
+		t.Errorf("published currency = %q, want USD", ev.Currency)
 	}
 	if ev.SpentOn != "2026-09-01" {
 		t.Errorf("spent_on = %q, want 2026-09-01", ev.SpentOn)

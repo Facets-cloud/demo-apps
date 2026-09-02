@@ -23,7 +23,7 @@ func main() {
 
 	obj := service.GCSObject{
 		Bucket:      "receipts-bucket",
-		Name:        "receipts/2026-09-01_starbucks_4.50_a1b2c3.jpg",
+		Name:        "receipts/2026-09-01_starbucks_4.50_USD_a1b2c3.jpg",
 		ContentType: "image/jpeg",
 		Size:        2048,
 	}

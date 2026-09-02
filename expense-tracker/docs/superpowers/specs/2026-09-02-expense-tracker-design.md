@@ -68,13 +68,15 @@ Three Cloud Functions (Gen2), all in one Go module:
 The `parser` package owns a single convention and both sides use it:
 
 ```
-receipts/<YYYY-MM-DD>_<vendor>_<amount>_<shortid>.<ext>
-e.g. receipts/2026-09-01_starbucks_4.50_a1b2c3.jpg
+receipts/<YYYY-MM-DD>_<vendor>_<amount>_<CURRENCY>_<shortid>.<ext>
+e.g. receipts/2026-09-01_starbucks_4.50_USD_a1b2c3.jpg
 ```
 
-- `parser.BuildObjectName(meta) (string, error)` — used by
-  **CreateUploadURL**. Slugifies vendor, formats amount, appends a short
-  random id + extension.
+- `parser.BuildObjectName(date, vendor, amount, currency, ext) (string, error)`
+  — used by **CreateUploadURL**. Slugifies vendor, formats amount,
+  normalizes currency to uppercase, appends a short random id + extension.
+  (A 4-part legacy name without the currency segment still parses, with
+  currency left empty.)
 - `parser.Parse(objectName) (Expense, error)` — used by
   **ReceiptUploaded**. Reverses it into a domain `Expense`, with sane
   fallbacks (unknown vendor, zero amount) rather than hard failures.

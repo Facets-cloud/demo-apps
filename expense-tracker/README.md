@@ -25,9 +25,10 @@ and Pub/Sub**. Monorepo-style: a Go `backend/` and a React `frontend/`.
 ```
 
 The single clever bit: a filename convention
-`receipts/YYYY-MM-DD_vendor_amount_shortid.ext` is the contract between
-the two sides — `CreateUploadURL` builds it, `ReceiptUploaded` parses it.
-No OCR needed for the demo.
+`receipts/YYYY-MM-DD_vendor_amount_CURRENCY_shortid.ext` is the contract
+between the two sides — `CreateUploadURL` builds it, `ReceiptUploaded`
+parses it. No OCR needed for the demo. (Legacy 4-part names without a
+currency segment still parse, with currency left empty.)
 
 ## Layout
 

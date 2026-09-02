@@ -60,7 +60,7 @@ func (h *Handler) Create(ctx context.Context, req CreateRequest) (CreateResponse
 		return CreateResponse{}, fmt.Errorf("contentType is required")
 	}
 
-	object, err := parser.BuildObjectName(req.Date, req.Vendor, req.Amount, req.Ext)
+	object, err := parser.BuildObjectName(req.Date, req.Vendor, req.Amount, req.Currency, req.Ext)
 	if err != nil {
 		return CreateResponse{}, err // covers bad/empty date and vendor/ext edge cases
 	}
