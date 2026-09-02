@@ -2,7 +2,7 @@
 // expense-tracker demo and wires the real GCP-backed implementations from
 // environment variables. It intentionally contains no business logic — every
 // handler decodes its input and delegates to a core package (service /
-// uploadurl) that is fully unit-tested offline.
+// uploadurl / store) that is fully unit-tested offline.
 package function
 
 import (
@@ -29,7 +29,7 @@ import (
 )
 
 func init() {
-	functions.HTTP("CreateUploadURL", createUploadURLHandler)
+	functions.HTTP("CreateUploadURL", webHandler)
 	functions.CloudEvent("ReceiptUploaded", receiptUploadedHandler)
 	functions.CloudEvent("SummaryConsumer", summaryConsumerHandler)
 }
@@ -53,8 +53,67 @@ func signURLTTL() time.Duration {
 }
 
 // ---------------------------------------------------------------------------
-// CreateUploadURL (HTTP)
+// Shared store
 // ---------------------------------------------------------------------------
+
+// sharedStore is the process-wide Store. All three services build it the same
+// way, so the web tier reads back what the async consumers wrote. Guarded by
+// storeMu and lazily initialized; tests inject a Fake by setting it directly.
+var (
+	storeMu     sync.Mutex
+	sharedStore store.Store
+)
+
+// getStore returns the shared Firestore (MongoDB-compatible) store when MONGO_URI
+// is set, otherwise an ephemeral in-memory store (per-instance; fine for local
+// dev, but async results won't be visible across services).
+func getStore(ctx context.Context) (store.Store, error) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	if sharedStore != nil {
+		return sharedStore, nil
+	}
+	uri := os.Getenv("MONGO_URI")
+	if uri == "" {
+		log.Printf("MONGO_URI unset — using in-memory store (ephemeral, per-instance; async results will NOT be shared across services)")
+		sharedStore = store.NewFake()
+		return sharedStore, nil
+	}
+	st, err := store.NewMongoStore(ctx, uri, os.Getenv("MONGO_DB"))
+	if err != nil {
+		return nil, fmt.Errorf("store init: %w", err)
+	}
+	sharedStore = st
+	return sharedStore, nil
+}
+
+// ---------------------------------------------------------------------------
+// Web tier (HTTP): POST /upload-url, GET /expenses, GET /summary
+// ---------------------------------------------------------------------------
+
+func setCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+}
+
+// webHandler is the single HTTP entrypoint (behind the nginx /api proxy). It
+// routes by method+path to the upload-URL, expenses, and summary handlers.
+func webHandler(w http.ResponseWriter, r *http.Request) {
+	setCORS(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	switch {
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/summary"):
+		handleSummary(w, r)
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/expenses"):
+		handleExpenses(w, r)
+	default:
+		handleUploadURL(w, r)
+	}
+}
 
 // createRequestJSON is the wire shape the frontend POSTs.
 type createRequestJSON struct {
@@ -66,15 +125,7 @@ type createRequestJSON struct {
 	ContentType string  `json:"contentType"`
 }
 
-func createUploadURLHandler(w http.ResponseWriter, r *http.Request) {
-	// CORS: this endpoint is called directly from the browser.
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST,OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
+func handleUploadURL(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "POST required")
 		return
@@ -108,15 +159,72 @@ func createUploadURLHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// expenseJSON is the wire shape returned by GET /expenses.
+type expenseJSON struct {
+	ID           string `json:"id"`
+	Vendor       string `json:"vendor"`
+	AmountCents  int64  `json:"amount_cents"`
+	Currency     string `json:"currency"`
+	SpentOn      string `json:"spent_on"`
+	SourceObject string `json:"source_object"`
+	CreatedAt    string `json:"created_at"`
+}
+
+func handleExpenses(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	st, err := getStore(ctx)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "store unavailable")
+		return
+	}
+	list, err := st.List(ctx, 100)
+	if err != nil {
+		log.Printf("handleExpenses: list: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "list failed")
+		return
+	}
+	out := make([]expenseJSON, 0, len(list))
+	for _, e := range list {
+		out = append(out, expenseJSON{
+			ID:           e.ID,
+			Vendor:       e.Vendor,
+			AmountCents:  e.AmountCents,
+			Currency:     e.Currency,
+			SpentOn:      e.SpentOn.Format("2006-01-02"),
+			SourceObject: e.SourceObject,
+			CreatedAt:    e.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func handleSummary(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	st, err := getStore(ctx)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "store unavailable")
+		return
+	}
+	s, err := st.GetSummary(ctx)
+	if err != nil {
+		log.Printf("handleSummary: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "summary failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, s)
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	writeJSON(w, status, map[string]string{"error": msg})
 }
 
 func newSigner(ctx context.Context) (signer.URLSigner, error) {
@@ -181,44 +289,28 @@ func receiptUploadedHandler(ctx context.Context, e event.Event) error {
 	if err != nil {
 		return err
 	}
-
-	svc, cleanup, err := newService(ctx)
+	svc, err := newService(ctx)
 	if err != nil {
 		return err
 	}
-	defer cleanup()
-
 	return svc.Handle(ctx, obj)
 }
 
-// memStore is a process-lifetime in-memory store. It exists only as long as the
-// Cloud Run instance: data is lost on restart, on scale-to-zero, and is NOT
-// shared across instances. This is the "in-memory now, Cloud SQL later" mode —
-// set DB_DSN to switch to the durable Postgres store.
-var memStore = store.NewFake()
-
-func newService(ctx context.Context) (*service.Service, func(), error) {
+func newService(ctx context.Context) (*service.Service, error) {
 	project := os.Getenv("GCP_PROJECT")
 	topic := os.Getenv("PUBSUB_TOPIC")
 	if project == "" || topic == "" {
-		return nil, nil, fmt.Errorf("GCP_PROJECT and PUBSUB_TOPIC are required")
+		return nil, fmt.Errorf("GCP_PROJECT and PUBSUB_TOPIC are required")
 	}
 	pub, err := events.NewPubSubPublisher(ctx, project, topic)
 	if err != nil {
-		return nil, nil, fmt.Errorf("publisher init: %w", err)
+		return nil, fmt.Errorf("publisher init: %w", err)
 	}
-
-	// Durable Postgres when DB_DSN is set; otherwise the ephemeral in-memory store.
-	if dsn := os.Getenv("DB_DSN"); dsn != "" {
-		st, err := store.NewPgxStore(ctx, dsn)
-		if err != nil {
-			return nil, nil, fmt.Errorf("store init: %w", err)
-		}
-		return service.New(st, pub), func() { st.Close() }, nil
+	st, err := getStore(ctx)
+	if err != nil {
+		return nil, err
 	}
-
-	log.Printf("ReceiptUploaded: DB_DSN unset — using in-memory store (ephemeral; data is lost on scale-to-zero/restart)")
-	return service.New(memStore, pub), func() {}, nil
+	return service.New(st, pub), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -256,25 +348,23 @@ func decodeExpenseCreated(e event.Event) (expense.ExpenseCreated, error) {
 	return ev, nil
 }
 
-var (
-	summaryMu    sync.Mutex
-	runningTotal int64 // process-lifetime running total in cents
-	runningCount int64
-)
-
-func summaryConsumerHandler(_ context.Context, e event.Event) error {
+// summaryConsumerHandler updates the shared running aggregate. Reading it back
+// via GET /summary is what proves the Pub/Sub hop ran, distinct from GET
+// /expenses (which proves the GCS-finalize hop).
+func summaryConsumerHandler(ctx context.Context, e event.Event) error {
 	ev, err := decodeExpenseCreated(e)
 	if err != nil {
 		return err
 	}
-
-	summaryMu.Lock()
-	runningTotal += ev.AmountCents
-	runningCount++
-	total, count := runningTotal, runningCount
-	summaryMu.Unlock()
-
+	st, err := getStore(ctx)
+	if err != nil {
+		return err
+	}
+	s, err := st.IncrementSummary(ctx, ev.AmountCents)
+	if err != nil {
+		return fmt.Errorf("increment summary: %w", err)
+	}
 	log.Printf("SummaryConsumer: expense %s vendor=%s amount_cents=%d | running total=%d cents over %d expenses",
-		ev.ID, ev.Vendor, ev.AmountCents, total, count)
+		ev.ID, ev.Vendor, ev.AmountCents, s.TotalCents, s.Count)
 	return nil
 }

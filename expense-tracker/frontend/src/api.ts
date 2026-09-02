@@ -1,4 +1,4 @@
-import type { ReceiptMeta, UploadTicket } from './types';
+import type { ReceiptMeta, UploadTicket, Summary, ExpenseItem } from './types';
 
 /**
  * Base path for the upload-URL request. Defaults to the same-origin relative
@@ -39,6 +39,29 @@ export async function createUploadUrl(meta: ReceiptMeta): Promise<UploadTicket> 
   }
 
   return (await res.json()) as UploadTicket;
+}
+
+/**
+ * Read the running summary aggregate (proves the Pub/Sub → SummaryConsumer path).
+ * Same-origin GET, reverse-proxied by nginx to the backend.
+ */
+export async function getSummary(): Promise<Summary> {
+  const res = await fetch(`${apiBase()}/summary`);
+  if (!res.ok) {
+    throw new Error(`Summary request failed (HTTP ${res.status})`);
+  }
+  return (await res.json()) as Summary;
+}
+
+/**
+ * Read the most recent expenses (proves the GCS-finalize → ReceiptUploaded path).
+ */
+export async function getExpenses(): Promise<ExpenseItem[]> {
+  const res = await fetch(`${apiBase()}/expenses`);
+  if (!res.ok) {
+    throw new Error(`Expenses request failed (HTTP ${res.status})`);
+  }
+  return (await res.json()) as ExpenseItem[];
 }
 
 /**

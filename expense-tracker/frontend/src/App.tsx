@@ -1,7 +1,13 @@
-import { useState, type FormEvent } from 'react';
-import { createUploadUrl, putFile } from './api';
-import type { ReceiptMeta } from './types';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { createUploadUrl, putFile, getSummary, getExpenses } from './api';
+import type { ReceiptMeta, Summary, ExpenseItem } from './types';
 import './styles.css';
+
+// After an upload the async pipeline (GCS finalize → ReceiptUploaded → Pub/Sub →
+// SummaryConsumer) takes a few seconds. Poll the read endpoints until the summary
+// count advances past its pre-upload baseline, so the result appears on its own.
+const POLL_MS = 2000;
+const POLL_MAX = 8;
 
 function today(): string {
   return new Date().toISOString().slice(0, 10);
@@ -10,6 +16,10 @@ function today(): string {
 function extFromName(name: string): string {
   const dot = name.lastIndexOf('.');
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function money(cents: number): string {
+  return (cents / 100).toFixed(2);
 }
 
 type Status =
@@ -26,7 +36,49 @@ export default function App() {
   const [date, setDate] = useState(today());
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
 
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [expenses, setExpenses] = useState<ExpenseItem[]>([]);
+  const [polling, setPolling] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
   const loading = status.kind === 'loading';
+
+  // Fetch the current summary + expenses. Best-effort: a failure leaves the
+  // panel as-is rather than surfacing an error over the upload flow.
+  async function refresh(): Promise<Summary | null> {
+    try {
+      const [s, xs] = await Promise.all([getSummary(), getExpenses()]);
+      if (s) setSummary(s);
+      if (xs) setExpenses(xs);
+      return s ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  useEffect(() => {
+    void refresh();
+    return () => {
+      if (timerRef.current) window.clearInterval(timerRef.current);
+    };
+  }, []);
+
+  function startPolling(baseline: number) {
+    if (timerRef.current) window.clearInterval(timerRef.current);
+    setPolling(true);
+    let attempts = 0;
+    void refresh();
+    timerRef.current = window.setInterval(async () => {
+      attempts += 1;
+      const s = await refresh();
+      const advanced = (s?.count ?? 0) > baseline;
+      if (advanced || attempts >= POLL_MAX) {
+        if (timerRef.current) window.clearInterval(timerRef.current);
+        timerRef.current = null;
+        setPolling(false);
+      }
+    }, POLL_MS);
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -45,12 +97,17 @@ export default function App() {
       };
       const ticket = await createUploadUrl(meta);
       await putFile(ticket.uploadUrl, file, ticket.headers['Content-Type']);
+      const baseline = summary?.count ?? 0;
       setStatus({ kind: 'success', objectName: ticket.objectName });
+      startPolling(baseline);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed';
       setStatus({ kind: 'error', message });
     }
   }
+
+  const count = summary?.count ?? 0;
+  const totalCents = summary?.total_cents ?? 0;
 
   return (
     <main className="app">
@@ -140,6 +197,32 @@ export default function App() {
             <p>{status.message}</p>
           </div>
         )}
+
+        <section className="panel panel--summary" aria-label="summary">
+          <div className="summary__head">
+            <strong>Summary</strong>
+            {polling && (
+              <span className="summary__spin" role="status">
+                processing… updates automatically
+              </span>
+            )}
+          </div>
+          <p className="summary__stat">
+            {count} receipt{count === 1 ? '' : 's'} · ${money(totalCents)} total
+          </p>
+          {expenses.length > 0 && (
+            <ul className="summary__list">
+              {expenses.map((x) => (
+                <li key={x.id}>
+                  <span className="summary__vendor">{x.vendor}</span>
+                  <span className="summary__amt">
+                    {x.currency} {money(x.amount_cents)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       </div>
     </main>
   );

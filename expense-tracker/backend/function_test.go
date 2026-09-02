@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 
@@ -13,6 +16,73 @@ import (
 	"github.com/anshulsao/demo-apps/expense-tracker/backend/internal/service"
 	"github.com/anshulsao/demo-apps/expense-tracker/backend/internal/store"
 )
+
+// withStore installs a Fake as the process-wide store for the duration of a test.
+func withStore(t *testing.T) *store.Fake {
+	t.Helper()
+	fake := store.NewFake()
+	storeMu.Lock()
+	sharedStore = fake
+	storeMu.Unlock()
+	t.Cleanup(func() {
+		storeMu.Lock()
+		sharedStore = nil
+		storeMu.Unlock()
+	})
+	return fake
+}
+
+func TestWebHandler_GetSummary(t *testing.T) {
+	fake := withStore(t)
+	ctx := context.Background()
+	_, _ = fake.IncrementSummary(ctx, 450)
+	_, _ = fake.IncrementSummary(ctx, 1200)
+
+	rec := httptest.NewRecorder()
+	webHandler(rec, httptest.NewRequest(http.MethodGet, "/summary", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var s store.Summary
+	if err := json.Unmarshal(rec.Body.Bytes(), &s); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+	if s.Count != 2 || s.TotalCents != 1650 {
+		t.Errorf("summary = %+v, want {2,1650}", s)
+	}
+}
+
+func TestWebHandler_GetExpenses(t *testing.T) {
+	fake := withStore(t)
+	ctx := context.Background()
+	_, _ = fake.Save(ctx, expense.Expense{ID: "1", Vendor: "starbucks", AmountCents: 450, Currency: "USD", CreatedAt: time.Now()})
+
+	rec := httptest.NewRecorder()
+	webHandler(rec, httptest.NewRequest(http.MethodGet, "/expenses", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var list []expenseJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rec.Body.String())
+	}
+	if len(list) != 1 || list[0].Vendor != "starbucks" || list[0].AmountCents != 450 {
+		t.Errorf("expenses = %+v, want one starbucks/450", list)
+	}
+}
+
+func TestWebHandler_OptionsPreflight(t *testing.T) {
+	rec := httptest.NewRecorder()
+	webHandler(rec, httptest.NewRequest(http.MethodOptions, "/upload-url", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("OPTIONS status = %d, want 204", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Errorf("missing CORS header on preflight")
+	}
+}
 
 // storageEvent builds a GCS object.finalized CloudEvent whose data is the given
 // object map, mirroring what Eventarc delivers over HTTP.
@@ -183,10 +253,17 @@ func TestDecodeExpenseCreated_EmptyData(t *testing.T) {
 }
 
 func TestSummaryConsumerHandler_UpdatesRunningTotal(t *testing.T) {
-	// Isolate the process-lifetime running total for a deterministic assertion.
-	summaryMu.Lock()
-	runningTotal, runningCount = 0, 0
-	summaryMu.Unlock()
+	// Inject a fresh in-memory store so the assertion is deterministic and
+	// isolated from other tests.
+	fake := store.NewFake()
+	storeMu.Lock()
+	sharedStore = fake
+	storeMu.Unlock()
+	t.Cleanup(func() {
+		storeMu.Lock()
+		sharedStore = nil
+		storeMu.Unlock()
+	})
 
 	for i, cents := range []int64{450, 1200} {
 		payload, err := json.Marshal(expense.ExpenseCreated{
@@ -204,13 +281,14 @@ func TestSummaryConsumerHandler_UpdatesRunningTotal(t *testing.T) {
 		}
 	}
 
-	summaryMu.Lock()
-	total, count := runningTotal, runningCount
-	summaryMu.Unlock()
-	if total != 1650 {
-		t.Errorf("runningTotal = %d, want 1650", total)
+	s, err := fake.GetSummary(context.Background())
+	if err != nil {
+		t.Fatalf("GetSummary: %v", err)
 	}
-	if count != 2 {
-		t.Errorf("runningCount = %d, want 2", count)
+	if s.TotalCents != 1650 {
+		t.Errorf("TotalCents = %d, want 1650", s.TotalCents)
+	}
+	if s.Count != 2 {
+		t.Errorf("Count = %d, want 2", s.Count)
 	}
 }
