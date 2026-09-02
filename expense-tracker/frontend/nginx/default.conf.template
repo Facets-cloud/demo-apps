@@ -20,9 +20,15 @@ server {
   # POST /api/upload-url is forwarded to ${BACKEND_URL}/upload-url.
   # BACKEND_URL is injected at deploy time, e.g.
   #   https://create-upload-url-xxxx.a.run.app
+  #
+  # IMPORTANT: do NOT override the Host header. Cloud Run's Google Frontend
+  # routes requests by the Host header (the *.run.app hostname). nginx defaults
+  # Host to the proxy_pass target's host, which is exactly what the backend
+  # service needs. Forcing "Host $host" would send THIS service's hostname, and
+  # the Google Frontend would route the request back to this same service (SPA),
+  # returning 200 index.html on GET and 405 on POST instead of proxying.
   location /api/ {
     proxy_pass ${BACKEND_URL}/;
-    proxy_set_header Host              $host;
     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
   }
