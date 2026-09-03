@@ -65,6 +65,19 @@ export async function getExpenses(): Promise<ExpenseItem[]> {
 }
 
 /**
+ * Get a short-lived signed GET URL to view a private receipt image (the mirror
+ * of the upload signing). Returns the URL string for use as an <img src>.
+ */
+export async function getReceiptUrl(object: string): Promise<string> {
+  const res = await fetch(`${apiBase()}/receipt-url?object=${encodeURIComponent(object)}`);
+  if (!res.ok) {
+    throw new Error(`Receipt URL request failed (HTTP ${res.status})`);
+  }
+  const body = (await res.json()) as { url: string };
+  return body.url;
+}
+
+/**
  * Upload the raw file bytes directly to GCS via the signed PUT URL.
  * Throws on a non-2xx response.
  */

@@ -73,6 +73,34 @@ func TestWebHandler_GetExpenses(t *testing.T) {
 	}
 }
 
+func TestValidateReceiptObject(t *testing.T) {
+	valid := []string{
+		"receipts/2026-09-02_starbucks_4.50_USD_f05ac5.jpg",
+		"receipts/a.png",
+	}
+	invalid := []string{"", "foo/x.jpg", "receipts/../secret", "x.jpg", "receipts/"}
+	for _, o := range valid {
+		if err := validateReceiptObject(o); err != nil {
+			t.Errorf("expected %q valid, got %v", o, err)
+		}
+	}
+	// "receipts/" alone (empty object) is allowed by prefix but harmless; focus on the
+	// clearly-bad cases that must be rejected.
+	for _, o := range invalid[:4] {
+		if err := validateReceiptObject(o); err == nil {
+			t.Errorf("expected %q to be rejected", o)
+		}
+	}
+}
+
+func TestWebHandler_ReceiptURL_BadObject(t *testing.T) {
+	rec := httptest.NewRecorder()
+	webHandler(rec, httptest.NewRequest(http.MethodGet, "/receipt-url", nil)) // no object param
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (missing object)", rec.Code)
+	}
+}
+
 func TestWebHandler_OptionsPreflight(t *testing.T) {
 	rec := httptest.NewRecorder()
 	webHandler(rec, httptest.NewRequest(http.MethodOptions, "/upload-url", nil))

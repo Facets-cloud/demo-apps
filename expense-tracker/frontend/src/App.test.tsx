@@ -29,6 +29,7 @@ beforeEach(() => {
   vi.mocked(api.putFile).mockResolvedValue(undefined);
   vi.mocked(api.getSummary).mockResolvedValue({ count: 0, total_cents: 0 });
   vi.mocked(api.getExpenses).mockResolvedValue([]);
+  vi.mocked(api.getReceiptUrl).mockResolvedValue('https://storage.googleapis.com/signed-get-url');
 });
 
 afterEach(() => {
@@ -85,6 +86,16 @@ describe('<App />', () => {
 
     expect(await screen.findByText(/3 receipts · \$17\.00 total/i)).toBeInTheDocument();
     expect(await screen.findByText('starbucks')).toBeInTheDocument();
+  });
+
+  it('shows a receipt thumbnail using a signed GET url', async () => {
+    vi.mocked(api.getSummary).mockResolvedValue({ count: 1, total_cents: 450 });
+    vi.mocked(api.getExpenses).mockResolvedValue([expenseItem]);
+    render(<App />);
+
+    const img = (await screen.findByAltText(/starbucks receipt/i)) as HTMLImageElement;
+    expect(img.src).toContain('signed-get-url');
+    expect(api.getReceiptUrl).toHaveBeenCalledWith(expenseItem.source_object);
   });
 
   it('refreshes the summary after an upload (proves the async pipeline is observed)', async () => {

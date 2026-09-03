@@ -110,9 +110,54 @@ func webHandler(w http.ResponseWriter, r *http.Request) {
 		handleSummary(w, r)
 	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/expenses"):
 		handleExpenses(w, r)
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/receipt-url"):
+		handleReceiptURL(w, r)
 	default:
 		handleUploadURL(w, r)
 	}
+}
+
+// validateReceiptObject guards which objects may be signed for GET. Only objects
+// under the "receipts/" prefix are allowed, and path traversal is rejected — so
+// this endpoint can never mint a URL for anything but an actual receipt.
+func validateReceiptObject(object string) error {
+	if object == "" {
+		return fmt.Errorf("object is required")
+	}
+	if !strings.HasPrefix(object, "receipts/") {
+		return fmt.Errorf("object must be under receipts/")
+	}
+	if strings.Contains(object, "..") {
+		return fmt.Errorf("invalid object path")
+	}
+	if len(object) > 512 {
+		return fmt.Errorf("object name too long")
+	}
+	return nil
+}
+
+// handleReceiptURL mints a short-lived signed GET URL so the browser can view a
+// private receipt image without the bucket being public.
+func handleReceiptURL(w http.ResponseWriter, r *http.Request) {
+	object := r.URL.Query().Get("object")
+	if err := validateReceiptObject(object); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx := r.Context()
+	sg, err := newSigner(ctx)
+	if err != nil {
+		log.Printf("handleReceiptURL: signer init: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "signer unavailable")
+		return
+	}
+	url, err := sg.SignGet(ctx, object, 15*time.Minute)
+	if err != nil {
+		log.Printf("handleReceiptURL: sign: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "could not sign url")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": url})
 }
 
 // createRequestJSON is the wire shape the frontend POSTs.

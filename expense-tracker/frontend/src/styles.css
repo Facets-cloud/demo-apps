@@ -217,3 +217,24 @@ input[type='file'] {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+
+/* ---- Receipt thumbnails in the summary list ----------------------------- */
+.summary__list li {
+  gap: 0.6rem;
+  align-items: center;
+}
+.summary__amt {
+  margin-left: auto;
+}
+.summary__thumb {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  object-fit: cover;
+  border: 1px solid var(--border);
+  background: #fff;
+  flex: none;
+}
+.summary__thumb--empty {
+  background: repeating-linear-gradient(45deg, #f1f5f9, #f1f5f9 4px, #e2e8f0 4px, #e2e8f0 8px);
+}

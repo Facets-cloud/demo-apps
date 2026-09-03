@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { createUploadUrl, putFile, getSummary, getExpenses } from './api';
+import { createUploadUrl, putFile, getSummary, getExpenses, getReceiptUrl } from './api';
 import type { ReceiptMeta, Summary, ExpenseItem } from './types';
 import './styles.css';
 
@@ -38,6 +38,7 @@ export default function App() {
 
   const [summary, setSummary] = useState<Summary | null>(null);
   const [expenses, setExpenses] = useState<ExpenseItem[]>([]);
+  const [receiptUrls, setReceiptUrls] = useState<Record<string, string>>({});
   const [polling, setPolling] = useState(false);
   const timerRef = useRef<number | null>(null);
 
@@ -62,6 +63,26 @@ export default function App() {
       if (timerRef.current) window.clearInterval(timerRef.current);
     };
   }, []);
+
+  // Fetch a signed view URL for each receipt we don't have one for yet, so the
+  // list can show a thumbnail without the bucket being public.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      for (const x of expenses) {
+        if (!x.source_object || receiptUrls[x.source_object]) continue;
+        try {
+          const url = await getReceiptUrl(x.source_object);
+          if (!cancelled) setReceiptUrls((m) => ({ ...m, [x.source_object]: url }));
+        } catch {
+          // ignore — the row just renders without a thumbnail
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [expenses]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function startPolling(baseline: number) {
     if (timerRef.current) window.clearInterval(timerRef.current);
@@ -214,6 +235,15 @@ export default function App() {
             <ul className="summary__list">
               {expenses.map((x) => (
                 <li key={x.id}>
+                  {receiptUrls[x.source_object] ? (
+                    <img
+                      className="summary__thumb"
+                      src={receiptUrls[x.source_object]}
+                      alt={`${x.vendor} receipt`}
+                    />
+                  ) : (
+                    <span className="summary__thumb summary__thumb--empty" aria-hidden="true" />
+                  )}
                   <span className="summary__vendor">{x.vendor}</span>
                   <span className="summary__amt">
                     {x.currency} {money(x.amount_cents)}

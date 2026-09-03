@@ -25,6 +25,20 @@ func TestFakeSigner_SignPut(t *testing.T) {
 	}
 }
 
+func TestFakeSigner_SignGet(t *testing.T) {
+	fs := NewFake()
+	url, err := fs.SignGet(context.Background(), "receipts/x.jpg", 15*time.Minute)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(url, "receipts/x.jpg") {
+		t.Errorf("expected signed get url to reference the object, got %q", url)
+	}
+	if len(fs.Calls) != 1 || fs.Calls[0].Object != "receipts/x.jpg" || fs.Calls[0].ContentType != "" {
+		t.Errorf("expected recorded get call with no content-type, got %+v", fs.Calls)
+	}
+}
+
 func TestFakeSigner_Error(t *testing.T) {
 	fs := NewFake()
 	fs.Err = errors.New("boom")
